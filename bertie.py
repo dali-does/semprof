@@ -13,6 +13,7 @@ import secrets
 
 import torch
 from transformers import BertModel, BertTokenizer
+from probing_model import LinearProbingModel
 
 #------------------------------------------------------------------------------------#
 #
@@ -39,10 +40,8 @@ def compute_transformer_embeddings(model, tokenizer, data, device):
         predictions = model(tensor_data).last_hidden_state[:,0]
         embs = predictions
 
-    return (embs,)
+    return embs
 
-def transformer_embed_data(model, tokenizer, data):
-    text_embeddings = None
 
 #------------------------------------------------------------------------------------#
 #
@@ -89,6 +88,7 @@ def build_common_lemmas (refresh = False):
 #
 #------------------------------------------------------------------------------------#
 
+
 def build_training_data(df_common_lemmas, refresh=False):
 
     print (df_common_lemmas)
@@ -126,11 +126,48 @@ def build_training_data(df_common_lemmas, refresh=False):
 #
 #------------------------------------------------------------------------------------#
 
-df_common_lemmas = build_common_lemmas(refresh=False)
-df_training_data = build_training_data(df_common_lemmas,refresh=False)
-print(df_training_data)
+def build_loader(x, y, batch_size=32):
+    dataset = torch.utils.data.TensorDataset(x, y)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=2)
+    return dataloader
+
+def train_probe(probe, dataloader, num_epochs=10):
+    loss_fn = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(probe.parameters(), lr=0.001)
+
+    running_loss = 0.0
+    for epoch in range(num_epochs):
+        for i, data in enumerate(dataloader):
+            inputs, labels = data
+            optimizer.zero_grad()
+    
+            outputs = probe(inputs)
+            loss = loss_fn(outputs, labels)
+            loss.backward()
+            optimizer.step()
+    
+            running_loss += loss.item()
+            if i % 100 == 0:
+                print(epoch + 1, i + 1, running_loss / 100)
+                running_loss = 0.0
+    print('Finished training')
+    return probe
+
+
+df_common_lemmas = build_common_lemmas(refresh=True)
+df_training_data = build_training_data(df_common_lemmas,refresh=True)
+#print(df_training_data)
 data = df_training_data['Lemma'][:3]
 
-print(data)
+relations = torch.tensor([0,1,2], dtype=torch.long)
+embeddings = compute_bert_embeddings(data)
 
-print (compute_bert_embeddings(data))
+
+num_classes = 3 #TODO number of relations
+embedding_dim = embeddings.shape[1]
+
+
+dataloader = build_loader(embeddings, relations, batch_size=2)
+probe = LinearProbingModel(embedding_dim, num_classes)
+
+trained_probe = train_probe(probe, dataloader)
