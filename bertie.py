@@ -21,6 +21,23 @@ from probing_model import LinearProbingModel
 import numpy as np
 from sklearn.model_selection import KFold
 
+import gensim.downloader
+#------------------------------------------------------------------------------------#
+#
+#   Embed text with Gensim
+#
+#------------------------------------------------------------------------------------#
+
+def compute_gensim_embeddings(text, pretrained_model='word2vec-google-news-300'):
+    model = gensim.downloader.load(pretrained_model)
+
+    embeddings = torch.zeros((len(text), 300))
+    for i, word in enumerate(text):
+        if word in model:
+            embeddings[i] = torch.tensor(model[word])
+    return embeddings
+
+
 #------------------------------------------------------------------------------------#
 #
 #   Embed text with BERT
@@ -31,33 +48,27 @@ def compute_huggingface_embeddings(text, tokenizer=BertTokenizer,
                                    pretrained_weights='bert-base-uncased',
                                    device=torch.device('cpu'),):
     tokenizer = tokenizer.from_pretrained(pretrained_weights)
-#    tokenizer.add_special_tokens({'pad_token':'[PAD]'})
-
+    should_add_tokens = pretrained_weights.startswith('gpt')
+    if should_add_tokens:
+        tokenizer.add_special_tokens({'pad_token':'[PAD]'})
     model = model.from_pretrained(pretrained_weights)
-
     model.resize_token_embeddings(len(tokenizer))
 
-    return compute_transformer_embeddings(model, tokenizer, text, device)
+    return compute_transformer_embeddings(model, tokenizer, text, device, should_add_tokens)
 
-def compute_bert_embeddings(text, device=torch.device('cpu')):
-    pretrained_weights = 'bert-base-uncased'
-    tokenizer = BertTokenizer.from_pretrained(pretrained_weights)
-    model = BertModel.from_pretrained(pretrained_weights)
-
-    return compute_transformer_embeddings(model, tokenizer, text, device)
-
-def compute_transformer_embeddings(model, tokenizer, data, device):
+def compute_transformer_embeddings(model, tokenizer, data, device, special_tokens=False):
     model = model.to(device)
 
     with torch.no_grad():
         data = [text.lower() for text in data]
-        tokenized_data = tokenizer.batch_encode_plus(data, pad_to_max_length=True)#, add_special_tokens=True)
+        tokenized_data = tokenizer.batch_encode_plus(data, pad_to_max_length=True, add_special_tokens=special_tokens)
         tensor_data = torch.tensor(tokenized_data['input_ids'])
         tensor_data = tensor_data.to(device)
 
+        # Tested with [:, 1] as well to check if last hidden state used
+        # makes difference, which for single word it doesn't
         predictions = model(tensor_data).last_hidden_state[:,0]
         embs = predictions
-
     return embs
 
 
@@ -87,7 +98,7 @@ def build_common_lemmas (refresh = False):
         sorted_words = sorted(words_count.items(), key = operator.itemgetter(1), reverse = True)
 
         # first 5000 most commonly-occuring words
-        V = [x[0] for x in sorted_words[:8000]]
+        V = [x[0] for x in sorted_words[:5000]]
         #C = V[:1000]
 
         filter_lemmas = [x for x in wordnet.words() if x in V]
@@ -127,23 +138,24 @@ def build_data_dynamic(df_common_lemmas, nym='hyper', refresh=False):
             synonyms = wordnet.synsets(lemma)
             nyms = []
             for syn in synonyms:
-                nyms += syn.lemma_names()
-                #syn_alts = get_altnyms(syn, nym)
-                #for syn_alt in syn_alts:
-                #   nyms += syn_alt.lemma_names()
-            nyms = [x for x in nyms if x in df_common_lemmas["Lemma"].values]
+                if nym == 'syn':
+                    nyms += syn.lemma_names()
+                else:
+                    syn_alts = get_altnyms(syn, nym)
+                    for syn_alt in syn_alts:
+                       nyms += syn_alt.lemma_names()
+            nyms = [x for x in nyms if x in df_common_lemmas["Lemma"].values and x != lemma]
             if (nyms):
                 pos = secrets.choice(nyms)
-                while pos is lemma:
+                while (pos == lemma):
                     pos = secrets.choice(nyms)
                 neg = secrets.choice(df_common_lemmas["Lemma"].values)
-#                import ipdb; ipdb.set_trace()
                 i = 1
-                while ((neg in nyms) and (i < 10)):
+                while ((neg in nyms) or (neg == lemma)) and (i < 10):
                     neg = secrets.choice(df_common_lemmas["Lemma"].values)
                     i = i + 1
                 if (i < 10):
-                    new_row = {'Lemma': lemma, 'Positive': pos, 'Negative': neg}
+                    new_row = {'Lemma': pos, 'Positive': lemma, 'Negative': neg}
                     df_data = df_data.append(new_row, ignore_index=True)
         df_data.to_pickle("training_data")
     else:
@@ -168,7 +180,6 @@ def build_data(df_common_lemmas, refresh=False):
             if (hypernyms):
                 pos = secrets.choice(hypernyms)
                 neg = secrets.choice(df_common_lemmas["Lemma"].values)
-#                import ipdb; ipdb.set_trace()
                 i = 1
                 while ((neg in hypernyms) and (i < 10)):
                     neg = secrets.choice(df_common_lemmas["Lemma"].values)
@@ -220,7 +231,6 @@ def eval_probe(probe, dataloader):
     correct = 0
     probe.eval()
     with torch.no_grad():
-#        __import__('ipdb').set_trace()
         for i, data in enumerate(dataloader):
             inputs, labels = data
 
@@ -231,8 +241,7 @@ def eval_probe(probe, dataloader):
     probe.train()
     return 100*correct/total
 
-def sample_probe(probe, dataloader, original_data, num_samples=10):
-    dataset = dataloader.dataset
+def sample_probe(probe, dataset, original_data, num_samples=10):
     dataset_size = len(dataset)
 
     # Get a random sample
@@ -245,7 +254,6 @@ def sample_probe(probe, dataloader, original_data, num_samples=10):
     correct = 0
     probe.eval()
     with torch.no_grad():
-#        __import__('ipdb').set_trace()
         for i, data in enumerate(sample_loader):
             inputs, labels = data
 
@@ -262,18 +270,20 @@ def sample_probe(probe, dataloader, original_data, num_samples=10):
             label_item = orig_item["Negative"] if labels[0] == 0 else orig_item["Positive"]
             pred_item = orig_item["Negative"] if preds[0] == 0 else orig_item["Positive"]
 
-            print("Predicted "+pred_str + "(" +pred_item +") was " + label_str + "("+label_item+") for lemma "+orig_item["Lemma"])
+            print("Triple: ", (orig_item["Lemma"], orig_item["Positive"], orig_item["Negative"]), "label: ", label_item, ", prediction was ", pred_item)
+            #print("Predicted "+pred_str + "(" +pred_item +") was " + label_str + "("+label_item+") for lemma "+orig_item["Lemma"])
             #print(labels)
             #print(preds)
             #print(original_data.iloc[random_index[i]])
     print("Accuracy: ", (100*correct/total))
     probe.train()
 
-def kfold_train_eval(embedder, df_data, k_folds=5):
+def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5):
+    np.random.seed(1974)
 
     kfold = KFold(n_splits=k_folds, shuffle=False)
-    dataset, embedding_dim = df_to_dataset(embedder, df_data)
-    print("Embedding dimension: ",embedding_dim/2)
+    dataset, embedding_dim = df_to_dataset(embedder, df_data, pos_or_neg, y)
+    #print("Embedding dimension: ",embedding_dim/2)
 
     accs = []
     num_classes = 2
@@ -290,81 +300,56 @@ def kfold_train_eval(embedder, df_data, k_folds=5):
             batch_size=32)
 
         probe = LinearProbingModel(embedding_dim, num_classes)
-        trained_probe = train_probe(probe, trainloader, num_epochs=20)
+        trained_probe = train_probe(probe, trainloader, num_epochs=10)
 
         accs.append(eval_probe(trained_probe, testloader))
-        #sample_probe(trained_probe, dataloader, df_test_data, num_samples=10)
+    #sample_probe(trained_probe, dataset, df_data, num_samples=10)
     mean_acc = np.mean(accs)
     std_acc = np.std(accs)
 
-    print("Accuracy: ", mean_acc, std_acc)
+    #print("Accuracy: ", mean_acc, std_acc)
+    return mean_acc, std_acc
 
 
-def df_to_dataset(embedder, df_data, seed=1971):
+def df_to_dataset(embedder, df_data, pos_or_neg, y):
     embeddings = embedder(df_data['Lemma'])
+    pos_or_neg = embedder(pos_or_neg)
+    joined_embeddings = torch.hstack((embeddings, pos_or_neg))
+    return build_dataset(joined_embeddings, y), joined_embeddings[0].shape[-1]
 
-#    __import__('ipdb').set_trace()
+def generate_y_from_df(df_data):
     pos_or_neg = df_data[['Positive','Negative']].apply(lambda row : row.sample(),axis=1)
     y = torch.tensor(pos_or_neg['Positive'].notna().astype(int).values, dtype=torch.long)
     pos_ratio = torch.sum(y)/len(y)
     print("Ratio of positive samples in dataset: ",pos_ratio)
 
     pos_or_neg = pos_or_neg.bfill(axis=1).iloc[:,0]
-    pos_or_neg = embedder(pos_or_neg)
 
-    joined_embeddings = torch.hstack((embeddings, pos_or_neg))
+    return pos_or_neg, y
 
-    return build_dataset(joined_embeddings, y), joined_embeddings[0].shape[-1]
+df_common_lemmas = build_common_lemmas(refresh=True)
 
-df_common_lemmas = build_common_lemmas(refresh=False)
-
-
-#df_training_data = df_data.sample(frac=0.8, random_state=1972)
-#df_test_data = df_data.drop(df_training_data.index).sample(frac=1.0)
+word2vec = lambda text: compute_gensim_embeddings(text, pretrained_model='word2vec-google-news-300')
+glove = lambda text: compute_gensim_embeddings(text, pretrained_model='glove-wiki-gigaword-300')
 
 albert = lambda text: compute_huggingface_embeddings(text, tokenizer=AlbertTokenizer, model=AlbertModel, pretrained_weights='albert-base-v2')
 roberta = lambda text: compute_huggingface_embeddings(text, tokenizer=RobertaTokenizer, model=RobertaModel, pretrained_weights='roberta-base')
-#gpt = lambda text: compute_huggingface_embeddings(text, tokenizer=GPT2Tokenizer, model=GPT2Model, pretrained_weights='gpt2')
+gpt = lambda text: compute_huggingface_embeddings(text, tokenizer=GPT2Tokenizer, model=GPT2Model, pretrained_weights='gpt2')
 bert = lambda text: compute_huggingface_embeddings(text)
 
-k_folds = 5
-print("Albert, Roberta, BERT")
-for nym in ['mero', 'hyper', 'hypo']:
-    df_data = build_data_dynamic(df_common_lemmas, nym, refresh=True)
-    print("Evaluating ",nym, " on ",len(df_data))
-    for embedder in [albert, roberta, bert]:
-    #for embedder in [gpt]:
-        kfold_train_eval(embedder, df_data)
 
-#embeddings = embedder(df_training_data['Lemma'])
-#
-#pos_or_neg = df_training_data[['Positive','Negative']].apply(lambda row : row.sample(),axis=1)
-#y = torch.tensor(pos_or_neg['Positive'].notna().astype(int).values, dtype=torch.long)
-#
-#pos_or_neg = pos_or_neg.bfill(axis=1).iloc[:,0]
-#pos_or_neg = embedder(pos_or_neg)
-#
-#num_classes = 2
-#embedding_dim = 2*embeddings.shape[1]
-#
-#joined_embeddings = torch.hstack((embeddings, pos_or_neg))
-##__import__('ipdb').set_trace()
-#
-#train_dataloader = build_dataset(joined_embeddings, y, batch_size=32)
-#probe = LinearProbingModel(embedding_dim, num_classes)
-#trained_probe = train_probe(probe, dataloader, num_epochs=20)
-#
-## 0 = neg, 1 = pos
-#pos_or_neg = df_test_data[['Positive','Negative']].apply(lambda row : row.sample(),axis=1)
-#y = torch.tensor(pos_or_neg['Positive'].notna().astype(int).values, dtype=torch.long)
-#pos_or_neg = pos_or_neg.bfill(axis=1).iloc[:,0]
-#pos_or_neg = embedder(pos_or_neg)
-#
-#embeddings = embedder(df_test_data['Lemma'])
-#joined_embeddings = torch.hstack((embeddings, pos_or_neg))
-#tes_dataloader = build_dataset(joined_embeddings, y, batch_size=32)
-#
-#eval_probe(trained_probe, dataloader)
-#pos_ratio = torch.sum(y)/len(y)
-#print("Ratio of positive samples in test: ",pos_ratio)
-#sample_probe(trained_probe, dataloader, df_test_data, num_samples=500)
+k_folds = 5
+print("word2vec, glove, Albert, Roberta, BERT, GPT2")
+for nym in ['syn','mero', 'hyper', 'hypo']:
+    np.random.seed(1974)
+    df_data = build_data_dynamic(df_common_lemmas, nym, refresh=True)
+    pos_or_neg, y = generate_y_from_df(df_data)
+    print("Evaluating ",nym, " on ",len(df_data))
+    for embedder in [word2vec, glove, albert, roberta, bert, gpt]:
+        res = []
+        for i in range(10):
+            mean_acc, std_acc = kfold_train_eval(embedder, df_data, pos_or_neg, y)
+            res.append(mean_acc)
+        mean_acc = np.mean(mean_acc)
+        std_acc = np.std(mean_acc)
+        print("Accuracy: ", mean_acc, std_acc)

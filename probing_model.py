@@ -49,3 +49,23 @@ class LinearProbingModel(nn.Module):
         x = self.activation(x)
         return x
 
+
+class LinearMultiInputProbingModel(nn.Module):
+    def __init__(self, embedding_dim, num_classes, activation=None):
+        super(LinearProbingModel, self).__init__()
+
+        self.input = nn.Linear(2*embedding_dim, num_classes)
+        self.dropout = nn.Dropout(p=0.2)
+
+        # Define sigmoid activation and softmax output
+        self.activation = nn.Softmax(dim=1)
+
+    def forward(self, x1, x2):
+        # Pass the input tensor through each of our operations
+        concatenated = torch.cat((x1.view(size(0), -1), x2.view(f.size(0), -1)),
+                                  dim=1)
+        x = self.dropout(concatenated)
+        x = self.input(x)
+        x = self.activation(x)
+        return x
+
