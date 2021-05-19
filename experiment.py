@@ -275,11 +275,10 @@ def sample_probe(probe, dataset, original_data, num_samples=10):
     probe.train()
 
 
-def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5):
+def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5, sample=False):
 
     kfold = KFold(n_splits=k_folds, shuffle=False)
     dataset, embedding_dim = df_to_dataset(embedder, df_data, pos_or_neg, y)
-    #print("Embedding dimension: ",embedding_dim/2)
 
     accs = []
     num_classes = 2
@@ -300,7 +299,8 @@ def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5):
         trained_probe = train_probe(probe, trainloader, num_epochs=10)
 
         accs.append(eval_probe(trained_probe, testloader))
-    sample_probe(trained_probe, dataset, df_data, num_samples=10)
+    if sample:
+        sample_probe(trained_probe, dataset, df_data, num_samples=10)
     return accs
 
 
@@ -332,6 +332,7 @@ gpt = lambda text: compute_huggingface_embeddings(text, tokenizer=GPT2Tokenizer,
 bert = lambda text: compute_huggingface_embeddings(text)
 
 
+show_samples = False
 use_control = False
 k_folds = 5
 print("word2vec, glove, Albert, Roberta, BERT, GPT2")
@@ -346,10 +347,10 @@ for nym in ['syn','mero', 'hyper', 'hypo']:
         if use_control:
             control_res = []
         for i in range(5):
-            accs = kfold_train_eval(embedder, df_data, pos_or_neg, y)
-            mean_acc = np.mean(accs)
+            fold_accs = kfold_train_eval(embedder, df_data, pos_or_neg, y, sample=show_samples)
+            mean_acc = np.mean()
             res.append(mean_acc)
-            accuracies += accs
+            accuracies += fold_accs
 
             if use_control: 
                 control_mean_acc, control_std_acc = kfold_train_eval(embedder, df_data, pos_or_neg, control_y)
