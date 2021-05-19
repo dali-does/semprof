@@ -22,6 +22,7 @@ import numpy as np
 from sklearn.model_selection import KFold
 
 import gensim.downloader
+
 #------------------------------------------------------------------------------------#
 #
 #   Embed text with Gensim
@@ -78,7 +79,7 @@ def compute_transformer_embeddings(model, tokenizer, data, device, special_token
 #
 #------------------------------------------------------------------------------------#
 
-def build_common_lemmas (refresh = False):
+def build_common_lemmas (num_most_common=5000, refresh = False):
 
     if (refresh):
 
@@ -98,8 +99,7 @@ def build_common_lemmas (refresh = False):
         sorted_words = sorted(words_count.items(), key = operator.itemgetter(1), reverse = True)
 
         # first 5000 most commonly-occuring words
-        V = [x[0] for x in sorted_words[:5000]]
-        #C = V[:1000]
+        V = [x[0] for x in sorted_words[:num_most_common]]
 
         filter_lemmas = [x for x in wordnet.words() if x in V]
 
@@ -271,15 +271,11 @@ def sample_probe(probe, dataset, original_data, num_samples=10):
             pred_item = orig_item["Negative"] if preds[0] == 0 else orig_item["Positive"]
 
             print("Triple: ", (orig_item["Lemma"], orig_item["Positive"], orig_item["Negative"]), "label: ", label_item, ", prediction was ", pred_item)
-            #print("Predicted "+pred_str + "(" +pred_item +") was " + label_str + "("+label_item+") for lemma "+orig_item["Lemma"])
-            #print(labels)
-            #print(preds)
-            #print(original_data.iloc[random_index[i]])
     print("Accuracy: ", (100*correct/total))
     probe.train()
 
+
 def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5):
-    np.random.seed(1974)
 
     kfold = KFold(n_splits=k_folds, shuffle=False)
     dataset, embedding_dim = df_to_dataset(embedder, df_data, pos_or_neg, y)
@@ -298,17 +294,14 @@ def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5):
         testloader = torch.utils.data.DataLoader(
             test_subset,
             batch_size=32)
+        probe = LinearProbingModel(embedding_dim, num_classes)
 
         probe = LinearProbingModel(embedding_dim, num_classes)
         trained_probe = train_probe(probe, trainloader, num_epochs=10)
 
         accs.append(eval_probe(trained_probe, testloader))
-    #sample_probe(trained_probe, dataset, df_data, num_samples=10)
-    mean_acc = np.mean(accs)
-    std_acc = np.std(accs)
-
-    #print("Accuracy: ", mean_acc, std_acc)
-    return mean_acc, std_acc
+    sample_probe(trained_probe, dataset, df_data, num_samples=10)
+    return accs
 
 
 def df_to_dataset(embedder, df_data, pos_or_neg, y):
@@ -320,12 +313,13 @@ def df_to_dataset(embedder, df_data, pos_or_neg, y):
 def generate_y_from_df(df_data):
     pos_or_neg = df_data[['Positive','Negative']].apply(lambda row : row.sample(),axis=1)
     y = torch.tensor(pos_or_neg['Positive'].notna().astype(int).values, dtype=torch.long)
+    control_y = torch.randint(0,2,(len(pos_or_neg),))
     pos_ratio = torch.sum(y)/len(y)
     print("Ratio of positive samples in dataset: ",pos_ratio)
 
     pos_or_neg = pos_or_neg.bfill(axis=1).iloc[:,0]
 
-    return pos_or_neg, y
+    return pos_or_neg, y, control_y
 
 df_common_lemmas = build_common_lemmas(refresh=True)
 
@@ -338,18 +332,36 @@ gpt = lambda text: compute_huggingface_embeddings(text, tokenizer=GPT2Tokenizer,
 bert = lambda text: compute_huggingface_embeddings(text)
 
 
+use_control = False
 k_folds = 5
 print("word2vec, glove, Albert, Roberta, BERT, GPT2")
 for nym in ['syn','mero', 'hyper', 'hypo']:
     np.random.seed(1974)
     df_data = build_data_dynamic(df_common_lemmas, nym, refresh=True)
-    pos_or_neg, y = generate_y_from_df(df_data)
+    pos_or_neg, y, control_y = generate_y_from_df(df_data)
     print("Evaluating ",nym, " on ",len(df_data))
     for embedder in [word2vec, glove, albert, roberta, bert, gpt]:
+        accuracies = []
         res = []
-        for i in range(10):
-            mean_acc, std_acc = kfold_train_eval(embedder, df_data, pos_or_neg, y)
+        if use_control:
+            control_res = []
+        for i in range(5):
+            accs = kfold_train_eval(embedder, df_data, pos_or_neg, y)
+            mean_acc = np.mean(accs)
             res.append(mean_acc)
-        mean_acc = np.mean(mean_acc)
-        std_acc = np.std(mean_acc)
+            accuracies += accs
+
+            if use_control: 
+                control_mean_acc, control_std_acc = kfold_train_eval(embedder, df_data, pos_or_neg, control_y)
+                control_res.append(control_mean_acc)
+        #mean_acc = np.mean(res)
+        #std_acc = np.std(res)
+        #print("Accuracy: ", mean_acc, std_acc)
+        mean_acc = np.mean(accuracies)
+        std_acc = np.std(accuracies)
         print("Accuracy: ", mean_acc, std_acc)
+        
+        if use_control:
+            control_mean_acc = np.mean(control_res)
+            control_std_acc = np.std(control_res)
+            print("Accuracy (control): ", control_mean_acc, control_std_acc)
