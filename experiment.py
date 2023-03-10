@@ -1,5 +1,7 @@
 # coding=utf-8
 import pandas as pd
+import datetime as dt
+import uuid
 import nltk
 nltk.download('wordnet')
 from nltk.corpus import wordnet
@@ -16,6 +18,10 @@ from transformers import BertModel, BertTokenizer
 from transformers import GPT2Tokenizer, GPT2Model
 from transformers import RobertaTokenizer, RobertaModel
 from transformers import AlbertTokenizer, AlbertModel
+from transformers import AutoTokenizer, T5EncoderModel
+from transformers import FlavaTextModel
+from transformers import BloomModel
+from transformers import AutoProcessor, BlipTextModel
 from probing_model import LinearProbingModel
 
 import numpy as np
@@ -44,16 +50,25 @@ def compute_gensim_embeddings(text, pretrained_model='word2vec-google-news-300')
 #   Embed text with BERT
 #
 #------------------------------------------------------------------------------------#
-def compute_huggingface_embeddings(text, tokenizer=BertTokenizer,
-                                   model=BertModel,
-                                   pretrained_weights='bert-base-uncased',
-                                   device=torch.device('cpu'),):
+def load_huggingface_model(model, tokenizer,
+                                   pretrained_weights,
+                                   device=torch.device('cuda')):
     tokenizer = tokenizer.from_pretrained(pretrained_weights)
+    if hasattr(tokenizer, 'tokenizer'):
+        tokenizer = tokenizer.tokenizer
+    model = model.from_pretrained(pretrained_weights)
     should_add_tokens = pretrained_weights.startswith('gpt')
     if should_add_tokens:
         tokenizer.add_special_tokens({'pad_token':'[PAD]'})
-    model = model.from_pretrained(pretrained_weights)
-    model.resize_token_embeddings(len(tokenizer))
+        model.resize_token_embeddings(len(tokenizer))
+
+    return model.to(device), tokenizer
+
+def compute_huggingface_embeddings(text, tokenizer,
+                                   model,
+                                   pretrained_weights,
+                                   device=torch.device('cuda'),):
+    should_add_tokens = pretrained_weights.startswith('gpt')
 
     return compute_transformer_embeddings(model, tokenizer, text, device, should_add_tokens)
 
@@ -70,7 +85,7 @@ def compute_transformer_embeddings(model, tokenizer, data, device, special_token
         # makes difference, which for single word it doesn't
         predictions = model(tensor_data).last_hidden_state[:,0]
         embs = predictions
-    return embs
+    return embs.to(device)
 
 
 #------------------------------------------------------------------------------------#
@@ -215,7 +230,7 @@ def train_probe(probe, dataloader, num_epochs=5, print_loss=False):
             optimizer.zero_grad()
     
             outputs = probe(inputs)
-            loss = loss_fn(outputs, labels)
+            loss = loss_fn(outputs, labels.to('cuda'))
             loss.backward()
             optimizer.step()
     
@@ -275,7 +290,8 @@ def sample_probe(probe, dataset, original_data, num_samples=10):
     probe.train()
 
 
-def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5, sample=False):
+def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5, sample=False,
+                    num_epochs=10):
 
     kfold = KFold(n_splits=k_folds, shuffle=False)
     dataset, embedding_dim = df_to_dataset(embedder, df_data, pos_or_neg, y)
@@ -289,14 +305,13 @@ def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5, sample=False):
 
         trainloader = torch.utils.data.DataLoader(
             train_subset,
-            batch_size=32)
+            batch_size=64)
         testloader = torch.utils.data.DataLoader(
             test_subset,
-            batch_size=32)
-        probe = LinearProbingModel(embedding_dim, num_classes)
+            batch_size=64)
 
-        probe = LinearProbingModel(embedding_dim, num_classes)
-        trained_probe = train_probe(probe, trainloader, num_epochs=10)
+        probe = LinearProbingModel(embedding_dim, num_classes).to('cuda')
+        trained_probe = train_probe(probe, trainloader, num_epochs=num_epochs)
 
         accs.append(eval_probe(trained_probe, testloader))
     if sample:
@@ -305,10 +320,10 @@ def kfold_train_eval(embedder, df_data, pos_or_neg, y, k_folds=5, sample=False):
 
 
 def df_to_dataset(embedder, df_data, pos_or_neg, y):
-    embeddings = embedder(df_data['Lemma'])
-    pos_or_neg = embedder(pos_or_neg)
+    embeddings = embedder(df_data['Lemma']).to('cuda')
+    pos_or_neg = embedder(pos_or_neg).to('cuda')
     joined_embeddings = torch.hstack((embeddings, pos_or_neg))
-    return build_dataset(joined_embeddings, y), joined_embeddings[0].shape[-1]
+    return build_dataset(joined_embeddings, y.to('cuda')), joined_embeddings[0].shape[-1]
 
 def generate_y_from_df(df_data):
     pos_or_neg = df_data[['Positive','Negative']].apply(lambda row : row.sample(),axis=1)
@@ -326,43 +341,65 @@ df_common_lemmas = build_common_lemmas(refresh=True)
 word2vec = lambda text: compute_gensim_embeddings(text, pretrained_model='word2vec-google-news-300')
 glove = lambda text: compute_gensim_embeddings(text, pretrained_model='glove-wiki-gigaword-300')
 
-albert = lambda text: compute_huggingface_embeddings(text, tokenizer=AlbertTokenizer, model=AlbertModel, pretrained_weights='albert-base-v2')
-roberta = lambda text: compute_huggingface_embeddings(text, tokenizer=RobertaTokenizer, model=RobertaModel, pretrained_weights='roberta-base')
-gpt = lambda text: compute_huggingface_embeddings(text, tokenizer=GPT2Tokenizer, model=GPT2Model, pretrained_weights='gpt2')
-bert = lambda text: compute_huggingface_embeddings(text)
-
+models = []
+paths = [
+    (AlbertModel,'albert-base-v2'),
+    (RobertaModel, 'roberta-base'),
+    (GPT2Model, 'gpt2'),
+    (T5EncoderModel, 't5-small'),
+    (T5EncoderModel, 't5-base'),
+    (T5EncoderModel, 't5-large'),
+    (T5EncoderModel, 'facebook/flava-full'),
+    (BlipTextModel, 'Salesforce/blip-image-captioning-base'),
+    (BloomModel, 'bigscience/bloom-560m'),
+]
+for (model,weights) in paths:
+    model, tokenizer = load_huggingface_model(model, AutoTokenizer, weights)
+    models.append(lambda text: compute_huggingface_embeddings(text,
+                                                              tokenizer=tokenizer,
+                                                              model=model,
+                                                              pretrained_weights=weights))
+# Ugly fix
+paths += [
+    (word2vec, 'word2vec'),
+    (glove, 'glove')
+]
+models += [word2vec, glove]
 
 show_samples = False
 use_control = False
+refresh = False
 k_folds = 5
-print("word2vec, glove, Albert, Roberta, BERT, GPT2")
+df_results = pd.DataFrame(columns=['Model',
+                                   'Nym',
+                                   'Accuracy Mean',
+                                   'Accuracy Std',
+                                   'Control Accuracy Mean',
+                                   'Control Accuracy Std'])
 for nym in ['syn','mero', 'hyper', 'hypo']:
     np.random.seed(1974)
-    df_data = build_data_dynamic(df_common_lemmas, nym, refresh=True)
+    df_data = build_data_dynamic(df_common_lemmas, nym, refresh=refresh)
     pos_or_neg, y, control_y = generate_y_from_df(df_data)
     print("Evaluating ",nym, " on ",len(df_data))
-    for embedder in [word2vec, glove, albert, roberta, bert, gpt]:
-        accuracies = []
-        res = []
-        if use_control:
-            control_res = []
-        for i in range(5):
-            fold_accs = kfold_train_eval(embedder, df_data, pos_or_neg, y, sample=show_samples)
-            mean_acc = np.mean()
-            res.append(mean_acc)
-            accuracies += fold_accs
+    for (i, embedder) in enumerate(models):
 
-            if use_control: 
-                control_mean_acc, control_std_acc = kfold_train_eval(embedder, df_data, pos_or_neg, control_y)
-                control_res.append(control_mean_acc)
-        #mean_acc = np.mean(res)
-        #std_acc = np.std(res)
-        #print("Accuracy: ", mean_acc, std_acc)
+        accuracies = kfold_train_eval(embedder, df_data, pos_or_neg, y, sample=show_samples)
+
         mean_acc = np.mean(accuracies)
         std_acc = np.std(accuracies)
         print("Accuracy: ", mean_acc, std_acc)
         
         if use_control:
-            control_mean_acc = np.mean(control_res)
-            control_std_acc = np.std(control_res)
+            control_accs = kfold_train_eval(embedder, df_data, pos_or_neg, control_y)
+            control_mean_acc = np.mean(control_accs)
+            control_std_acc = np.std(control_accs)
             print("Accuracy (control): ", control_mean_acc, control_std_acc)
+            df_results.loc[-1] = [embedder.__name__, nym, mean_acc, std_acc,
+                                  control_mean_acc, control_std_acc]
+        res = [paths[i][1], nym, mean_acc, std_acc, 0, 0]
+        df_res = pd.DataFrame([res],columns=df_results.columns)
+        df_results = pd.concat([df_results, df_res], ignore_index=True)
+
+path = dt.datetime.today().strftime("%Y%m%d%M")
+filename = "probe-"+path+'-'+str(uuid.uuid4())
+df_results.to_pickle(filename)

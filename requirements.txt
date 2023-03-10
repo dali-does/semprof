@@ -1,6 +1,5 @@
 appdirs==1.4.4
 backcall==0.2.0
-btrfsutil==5.12.1
 CacheControl==0.12.6
 cffi==1.14.5
 chardet==4.0.0
@@ -32,14 +31,12 @@ pep517==0.10.0
 pexpect==4.8.0
 pickleshare==0.7.5
 ply==3.11
-powerline-status==2.8.2
+powerline-status
 progress==1.5
 prompt-toolkit==3.0.18
 ptyprocess==0.7.0
-pycairo==1.20.0
 pycparser==2.20
 Pygments==2.9.0
-PyGObject==3.40.1
 pyOpenSSL==20.0.1
 pyparsing==2.4.7
 python-dateutil==2.8.1
@@ -61,7 +58,7 @@ toml==0.10.2
 torch==1.8.1
 tqdm==4.60.0
 traitlets==5.0.5
-transformers==4.5.1
+transformers
 typing-extensions==3.10.0.0
 urllib3==1.26.4
 wcwidth==0.2.5
